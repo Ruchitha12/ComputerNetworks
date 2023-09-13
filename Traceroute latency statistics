@@ -1,0 +1,274 @@
+""" Author: Ruchitha Vishwanath (ruchitha.rv@gmail.com/rv60031@uga.edu)
+    Created: 30 August 2023
+    Description: This Project is to automatically executes traceroute multiple times towards a target domain name or IP address specified as command line parameter. 
+    Based on multiple traceroute executions, the program will need to derive latency statistics for each hop between the traceroute client and the target machine.
+"""
+import subprocess
+import re
+import os
+import statistics
+import time
+import socket
+import json
+import argparse
+from argparse import Namespace
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+"""Function to get Host name from IP address
+   Arguments: ip_address
+"""
+def resolve_host(ip_address):
+    try:
+        host_name, _, _ = socket.gethostbyaddr(ip_address)
+        return host_name
+    except socket.herror:
+        return ip_address
+    
+##################################################################################################################################
+"""Function to store all the hop data in a list
+   Argument: traceroute_output
+"""
+def parse_traceroute_output(traceroute_output):
+        
+    # Initialize a list to store hop data for this run
+        hop_data = []
+
+        # Split the traceroute output by hop number
+        hop_sections = re.split(r'\n\s*(\d+)\s', traceroute_output)[1:]
+        for i in range(0, len(hop_sections), 2):
+            hop_num = hop_sections[i]
+            latency_section = hop_sections[i + 1]
+            hop_info = {}
+
+            # Extract hop number from the beginning of hop_section
+            hop_num_match = re.match(r'\d+', hop_num)
+            if hop_num_match:
+                hop_info['hop'] = int(hop_num_match.group())
+            else:
+                hop_info['hop'] = None
+
+            # Extract latency values
+            latency_values = [float(value) for value in re.findall(r'(\d+\.\d+) ms', latency_section)]
+
+            # Extract IP addresses
+            ip_addresses = re.findall(r'(\d+\.\d+\.\d+\.\d+)', latency_section)
+
+            # Attempt to resolve IP addresses to hostnames
+            hosts = [resolve_host(ip) for ip in ip_addresses]
+
+            # Calculate statistics
+            hop_info['avg'] = statistics.mean(latency_values) if latency_values else None
+            hop_info['min'] = min(latency_values) if latency_values else None
+            hop_info['max'] = max(latency_values) if latency_values else None
+            hop_info['med'] = statistics.median(latency_values) if latency_values else None
+            hop_info['hosts'] = hosts
+
+            hop_data.append(hop_info)
+        return hop_data
+
+##################################################################################################################################
+"""Function to run traceroute and get the list of all the hops for each execution
+   Arguments: hostname, num_runs, run_delay, max_hops, trace_file_list
+"""
+def run_traceroute(hostname, num_runs, run_delay, max_hops, trace_file_list):
+    all_hop_data = []
+    if trace_file_list:
+        for file_name in trace_file_list:
+            file_path = os.path.join(test_dir_name, file_name)
+
+            # Check if it's a file (not a directory)
+            if os.path.isfile(file_path):
+                # Open and read the file
+                with open(file_path, 'r') as file:
+                    file_data = file.read()
+                    hop_data = parse_traceroute_output(file_data)
+                    all_hop_data.append(hop_data)
+                    file.close()
+    else:
+        if num_runs and hostname:
+            for _ in range(num_runs):
+
+                # Run the traceroute command and capture its output
+                if max_hops and max_hops > 0:
+                    command = ['traceroute', '-n','-m', str(max_hops), hostname]
+                else:
+                    command = ['traceroute', '-n', hostname]
+                traceroute_output = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                stdout, stderr = traceroute_output.communicate()
+                if traceroute_output.returncode != 0:
+                    print(f"Traceroute failed with error: {stderr}")
+                    return
+                hop_data = parse_traceroute_output(stdout)
+                all_hop_data.append(hop_data)
+
+                #Run delay between traceroute execution
+                time.sleep(run_delay)
+    return all_hop_data
+
+#################################################################################################################################
+"""Function to read the hops data from each run and store the avg, min, max and med of each Hops
+   Arguments: all_hop_data
+"""
+def combine_data(all_hop_data):
+    combined_data = []
+
+    if not all_hop_data:
+        return combined_data
+
+    num_hops = max(len(data) for data in all_hop_data)
+
+    for i in range(num_hops):
+        hop_info = {}
+        hop_info['hop'] = i + 1  # Hop numbers start from 1
+
+        # Combine latency statistics across all runs
+        avg_latency = statistics.mean([data[i]['avg'] for data in all_hop_data if i < len(data) and data[i]['avg'] is not None and data[i]['avg'] != "null"]) if any(i < len(data) and data[i]['avg'] is not None and data[i]['avg'] != "null" for data in all_hop_data) else None
+        min_latency = min([data[i]['min'] for data in all_hop_data if i < len(data) and data[i]['min'] is not None and data[i]['min'] != "null"]) if any(i < len(data) and data[i]['min'] is not None and data[i]['min'] != "null" for data in all_hop_data) else None
+        max_latency = max([data[i]['max'] for data in all_hop_data if i < len(data) and data[i]['max'] is not None and data[i]['max'] != "null"]) if any(i < len(data) and data[i]['max'] is not None and data[i]['max'] != "null" for data in all_hop_data) else None
+        med_latency = statistics.median([data[i]['med'] for data in all_hop_data if i < len(data) and data[i]['med'] is not None and data[i]['med'] != "null"]) if any(i < len(data) and data[i]['med'] is not None and data[i]['med'] != "null" for data in all_hop_data) else None
+
+        hop_info['avg'] = avg_latency
+        hop_info['min'] = min_latency
+        hop_info['max'] = max_latency
+        hop_info['med'] = med_latency
+
+        # Combine host information (use the first run's hosts)
+        hop_info['hosts'] = all_hop_data[0][i]['hosts'] if i < len(all_hop_data[0]) else []
+        combined_data.append(hop_info)
+    return combined_data
+
+##################################################### Program Starts Here ##########################################################
+if __name__ == "__main__":
+    print("---START---")
+    try:
+        parser = argparse.ArgumentParser(description='Traceroute Tool')
+
+        # Define the command-line arguments
+        parser.add_argument('-n', '--num_runs', type=int, help='Number of times traceroute will run')
+        parser.add_argument('-d', '--run_delay', type=int, help='Number of seconds to wait between two consecutive runs')
+        parser.add_argument('-m', '--max_hops', type=int, help='Maximum number of hops')
+        parser.add_argument('-o', '--output', help='Path and name of the output JSON file containing the stats')
+        parser.add_argument('-g', '--graph', help='Path and name of the output PDF file containing stats graph')
+        parser.add_argument('-t', '--target', help='A target domain name or IP address (required if --test is absent)')
+        parser.add_argument('--test', '--test_dir', help='Directory containing num_runs text files, each of which contains the output of a traceroute run. If present, this will override all other options, and traceroute will not be invoked. Stats will be computed over the traceroute output stored in the text files')
+
+        # Parse the command-line arguments
+        if parser:
+            args: Namespace = parser.parse_args()
+            num_runs = None
+            max_hops = None
+            target = None
+            test_dir_name = None
+            trace_file_list = None
+
+            if args.num_runs and args.num_runs > 0:
+                num_runs = args.num_runs
+            if args.run_delay:
+                run_delay = args.run_delay
+            else:
+                run_delay = 0
+            if args.max_hops:
+                max_hops = args.max_hops
+            if args.output:
+                json_filename = args.output
+            else:
+                json_filename = "traceroute_output.json"
+            if args.graph:
+                boxplot = args.graph
+            else:
+                boxplot = 'boxplot.pdf'
+            if args.target:
+                target = args.target
+            if args.test:
+                test_dir_name = args.test
+
+        # Execute when test directory is passed as an input
+        if test_dir_name:
+            if not os.path.exists(test_dir_name):
+                print(f"The directory '{test_dir_name}' does not exist.")
+                exit()
+            trace_file_list = os.listdir(test_dir_name)
+
+        print("Executing.....")
+
+        # Call function to run Traceroute
+        all_hop_data = run_traceroute(target, num_runs, run_delay, max_hops, trace_file_list)
+
+        # Call function to get avg, min, max and med of hops from each run
+        combined_data = combine_data(all_hop_data)
+
+        if combined_data:
+
+            # Save the output in JSON file
+            with open(json_filename, 'w') as json_file:
+                json.dump(combined_data, json_file, indent=4)
+            print(f"Traceroute output saved to {json_filename}.")
+
+            # Plot the boxplot graph to show Latency Distribution per each hop
+            # Initialize empty lists
+            hops = []
+            avg_values = []
+            max_values = []
+            min_values = []
+            med_values = []
+
+            #Prepare the list of values
+            for entry in combined_data:
+                if entry['avg'] is not None and entry['max'] is not None and entry['min'] is not None and entry['med'] is not None:
+                    hops.append(entry['hop'])
+                    avg_values.append(entry['avg'])
+                    max_values.append(entry['max'])
+                    min_values.append(entry['min'])
+                    med_values.append(entry['med'])
+
+            # Calculate Interquartile Range, First Quartile and Second Quartile
+            q1_values=[]
+            q3_values=[]
+            for i in range(len(hops)):
+                IQR = (max_values[i] - min_values[i]) / 2
+                q1_values.append(med_values[i] - IQR / 2)
+                q3_values.append(med_values[i] + IQR / 2)
+                
+            dt={}
+            for hop, min_val, q1, med_val, q3, max_val in zip(hops, min_values, q1_values, med_values, q3_values, max_values):
+                dt[hop] = [min_val, q1, med_val, q3, max_val]
+            
+            max_y = max(max_values)
+
+            df = pd.DataFrame(dt)
+
+            # Set Plot style, figure size and create vertical box plots
+            sns.set(style="whitegrid") 
+            plt.figure(figsize=(10, 8))
+            sns.boxplot(data=df, orient="v")
+
+            # Add title and labels
+            plt.title("Latency Distribution Boxplot per Hop")
+            plt.xlabel("Hops")
+            plt.ylabel("Latency")
+
+            # Customize the x-axis labels to match the categories
+            plt.xticks(range(len(hops)), hops)
+            
+            # Customize the y-axis range based on the maximum value
+            plt.yticks(range(0, round(max_y) + 1, 5))
+
+            # Plot the averages as red points
+            plt.scatter(range(len(hops)), avg_values, color="red", label="Average", marker="o")
+
+            # Add a legend to label the red points
+            plt.legend()
+
+            # Save the plot as a PDF
+            plt.savefig(boxplot)
+            print(f"Latency Distribution Boxplot saved to {boxplot}.")
+
+            #plt.show()
+        else:
+            print("No traceroute data available.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        print("---END---")
+    print("---END---")
